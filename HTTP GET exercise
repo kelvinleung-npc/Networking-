@@ -1,0 +1,132 @@
+import socket 
+import threading 
+import sys 
+import threading
+from datetime import datetime
+# python3 servertest.py 10.10.1.100 5050
+#tells us length of the message
+HEADER = 64
+#get the port number
+PORT = int(sys.argv[2])
+#get the value of the ip address of server
+SERVER_IP = socket.gethostbyname(sys.argv[1])
+print(SERVER_IP)
+#TYPE OF INFORMATION BEING SENT OVER AS BYTES
+FORMAT = 'utf-8' 
+#ADDRESS OF SERVER SOCKET TUPLE (IP, PORT)
+ADDR = (SERVER_IP, PORT)
+#server socket        //socket ADDRESS FAMILY     //type of stream
+DISCONNECT_MESSAGE = "disconnected"
+#Timeout Time 
+TIMEOUT = 20
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.bind(ADDR)
+   
+#setblocking = false makes it non blocking 
+# GET /test.py HTTP/1.0
+
+# Connection: keep-alive
+# Connection: close
+def handle_client(conn,addr):
+    connected = True
+    client_ip = addr[0]
+    port = addr[1]
+    breakout_flag = False 
+    blank_beginning = True
+    while connected: 
+        if breakout_flag == True: 
+            break 
+        if blank_beginning == False:
+            connected = False 
+        #split the first message up into a list 
+        try: 
+            msg = conn.recv(HEADER).decode(FORMAT).rstrip("\n")
+        except socket.timeout: 
+            break 
+        if msg != "":
+            blank_beginning = False 
+        msg_split = msg.split(" ") 
+        date = datetime.now()
+        date = datetime.strftime(date, '%a %b %d %H:%M:%S PDT %Y')
+        #if it is a valid request continue 
+        if (msg_split[0] == "GET") and (msg_split[2] == "HTTP/1.0"): 
+            filename = msg_split[1][1:]
+            HTTP_ARGUMENTS = True
+            while HTTP_ARGUMENTS: 
+                try: 
+                    connection_msg = conn.recv(HEADER).decode(FORMAT).rstrip("\n")
+                except socket.timeout: 
+                    breakout_flag = True 
+                #allow another request
+
+                if (connection_msg.lower() == "connection:keep-alive") or (connection_msg.lower() == "connection: keep-alive"):
+                    connected = True
+                    
+                #do not allow another request
+                elif (connection_msg.lower() == "connection:close") or (connection_msg.lower() == "connection: close"):
+                    connected = False
+                    
+                #process the request ie \n\n is the end of a request
+                elif connection_msg == "":
+                    HTTP_ARGUMENTS = False 
+                    break 
+                #unnecessary input
+                else: 
+                    continue
+            if breakout_flag == True:
+                break 
+            try: 
+                with open(filename, 'r') as file_pointer:
+                    lines = file_pointer.readlines()
+                    conn.send(bytes("HTTP/1.0 200 OK", FORMAT))
+                    if connected == True:
+                        conn.send(bytes(" Connection: keep-alive\n",FORMAT))
+                    if connected == False:
+                        conn.send(bytes(" Connection: close\n", FORMAT))
+                    for line in lines: 
+                        conn.send(bytes(line,FORMAT))
+                    conn.send(bytes("\n",FORMAT))
+                    print(date,":",client_ip,":",port," ", msg,";"," HTTP/1.0 200 OK\n" , sep = '')
+                    if connected == False:
+                        break 
+
+            except FileNotFoundError: 
+                conn.send(bytes("HTTP/1.0 404 Not Found", FORMAT))
+                print(date,":",client_ip,":",port," ", msg,";"," HTTP/1.0 404 Not Found\n", sep = '')
+                if connected == True:
+                    conn.send(bytes(" Connection: keep-alive\n",FORMAT))
+                if connected == False:
+                    conn.send(bytes(" Connection: close\n", FORMAT)) 
+                    break
+
+        elif (msg == "") and (connected == True):
+            continue 
+        elif msg == "": 
+            break
+        else: 
+        #return HTTP/1.0 400 Bad Request
+            print(date,":",client_ip,":",port," ", msg,";"," HTTP/1.0 400 Bad Request\n", sep = '')
+            conn.send(bytes("HTTP/1.0 400 Bad Request\n",FORMAT))
+            conn.send(bytes(" Connection:close\n", FORMAT))
+            break
+    conn.close()
+
+            
+               
+def start(): 
+    #listen for attempts to connect to server. if listen is given a number
+    #that is the number of connections that can be queued before dropping them
+    server.listen()
+    
+        #conn is a socket object, addr is an address bound to other end of connection  
+        #BLOCKING LINE OF CODE
+    
+    while True:
+        conn , addr = server.accept()
+        conn.settimeout(TIMEOUT) 
+        thread = threading.Thread(target = handle_client, args = (conn,addr))
+        thread.start()
+
+       
+print("[Starting] server...")
+start()
