@@ -1,0 +1,258 @@
+import socket 
+import sys 
+import threading 
+import os 
+import re
+from datetime import datetime
+# python3 rdp.py h1 6789 large.txt test.txt
+# 
+# mkfifo fifo
+# cat fifo | nc -u -l 8888 > fifo
+# nc -u h2 8888
+# tcpdump -n -l -i r-eth1 udp port 8888
+#Commands:RST SYN FIN DAT
+#Headers: sequence acknowledge window length
+#slice the file. 
+FORMAT = ("utf-8")
+
+def Sort_By_Sequence(val):
+    return val[2]
+
+def create_udp(ip_address, port_number):
+    address = (ip_address, port_number)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) 
+    sock.bind(address)
+    sock.settimeout(1)
+    return sock
+
+def getSize(filename):
+    st = os.stat(filename)
+    return st.st_size
+
+def calcdate():
+    date = datetime.now()
+    date = datetime.strftime(date, '%a %b %d %H:%M:%S PDT %Y')
+    return date
+
+def packetsplit(packet):
+
+    packetobject = packet
+    packet_parts = re.split("\r\n",packetobject)
+    #print(packet_parts)
+    command = packet_parts[0]
+    packetsplice1 = packet_parts[1]
+    headerparts1 = re.split(":",packetsplice1)
+    header1 = headerparts1[0]
+    value1 = int(headerparts1[1])
+    packetsplice2 = packet_parts[2]
+    headerparts2 = re.split(":",packetsplice2)
+    header2 = headerparts2[0]
+    value2 = int(headerparts2[1])
+    payload = None
+    try:
+        payload = packet_parts[4]
+    except IndexError: 
+        payload = None 
+    return command, header1, value1, header2, value2, payload
+
+
+#SYN\N Send\N Sequence\N Length\N 
+#get the byte size of the file to be sent over
+
+
+FileSize = getSize(sys.argv[3])
+#window size of receiver 
+IntWindowSize = 5120
+StrWindowSize = str(IntWindowSize)
+#how many packets 
+CurrentWindowSize = 0 
+MaxPacketSize = 1024
+port = int(sys.argv[2])
+ip = (sys.argv[1])
+ECHOSERVER = ('h2',8888)
+rdp_socket = create_udp( ip, port)     
+#will need to account for syn packet loss later 
+
+
+rdp_socket.sendto(("SYN\r\nSequence:0\r\nLength:0\r\n\r\n").encode(FORMAT),ECHOSERVER)
+date = calcdate()
+print(f'{date}: Send; SYN; Sequence: 0; Length: 0')
+PAYLOADLIST = []
+file = open(sys.argv[3],"r")
+bytepack = file.read(MaxPacketSize)
+packetcount = 1;
+PAYLOADLIST.append(bytepack)
+while True:
+    bytepack = file.read(MaxPacketSize)
+    if bytepack == '':
+        break
+    packetcount = packetcount + 1
+    PAYLOADLIST.append(bytepack)
+
+file.close()
+#print(f'{date}: Send; {command}; {header1}: {value1}; {header2}: {value2}')
+
+while True: 
+    
+    try:
+        data, address = rdp_socket.recvfrom(2000)
+        data = data.decode(FORMAT)
+        if data[0:3] == "SYN":
+            date = calcdate()
+            command, header1, value1, header2, value2, payload = packetsplit(data)
+            print(f'{date}: Receive; {command}; {header1}: {value1}; {header2}: {value2}')
+            sendstring = "ACK\r\nAcknowledgment:1\r\nWindow:"+StrWindowSize+"\r\n\r\n"
+            rdp_socket.sendto((sendstring).encode(FORMAT),ECHOSERVER)
+            print(f'{date}: Send; ACK; Acknowledgement: 1; Window: {StrWindowSize}')
+            
+        
+        if data[0:3] == "ACK":
+            date = calcdate()
+            command, header1, value1, header2, value2, payload = packetsplit(data)
+            print(f'{date}: Receive; {command}; {header1}: {value1}; {header2}: {value2}')
+            CurrentWindowSize = value2
+            break 
+        
+    except socket.timeout: 
+        print(f'{date}: Send; SYN; Sequence:0; Length: 0')
+        rdp_socket.sendto(("SYN\r\nSequence:0\r\nLength:0\r\n\r\n").encode(FORMAT),ECHOSERVER)
+        
+
+#packet = re.split(r'.(?=SYN\n|FIN\n|RST\n|ACK\n|DAT\n)',data)
+PAYLOADLISTNUMBER = 0
+RECVWINDOW = 5120
+
+#SENDER SIDE TRACKER
+SEQ_NUMBER1 = 1
+ACK_NUMBER1 = 1
+
+
+#RECEIVER SIDE TRACKER
+SEQ_NUMBER2 = 1
+ACK_NUMBER2 = 1
+
+FILETOWRITE = open(sys.argv[4], "w")
+while (ACK_NUMBER2 < FileSize): 
+    if CurrentWindowSize > 0 and (PAYLOADLISTNUMBER != packetcount):
+ #SENDER SIDE       
+        if CurrentWindowSize < MaxPacketSize:
+            #could potentially slice data string to keep using same list packet to send 
+            data = PAYLOADLIST[PAYLOADLISTNUMBER]
+            print(f'Current Window Size 1 is {CurrentWindowSize}') 
+            rdp_socket.sendto((f'DAT\r\nSequence:{SEQ_NUMBER1}\r\nLength:{CurrentWindowSize}\r\n\r\n{data}').encode(FORMAT),ECHOSERVER)
+            print(f'{date}: Send; DAT; Sequence:{SEQ_NUMBER1}; Length: {CurrentWindowSize}')
+            PAYLOADLISTNUMBER = PAYLOADLISTNUMBER + 1
+            SEQ_NUMBER1 = SEQ_NUMBER1 + CurrentWindowSize
+            CurrentWindowSize = CurrentWindowSize - len(data)
+            
+        else: 
+            data = PAYLOADLIST[PAYLOADLISTNUMBER]
+            rdp_socket.sendto((f'DAT\r\nSequence:{SEQ_NUMBER1}\r\nLength:{1024}\r\n\r\n{data}').encode(FORMAT),ECHOSERVER)
+            print(f'{date}: Send; DAT; Sequence:{SEQ_NUMBER1}; Length: 1024')
+            PAYLOADLISTNUMBER = PAYLOADLISTNUMBER + 1
+            SEQ_NUMBER1 = SEQ_NUMBER1 + 1024
+            CurrentWindowSize = CurrentWindowSize - len(data)
+            
+           
+    else:
+        while 1:
+            try:
+                data, address = rdp_socket.recvfrom(10000)
+                data = data.decode(FORMAT)
+#RECEIVER SIDE  
+                if data[0:3] == "DAT":
+                    #without . after r' it creates an empty entry 0, but causes issues without it
+                    concat_packets = re.split(r'(?=SYN\r\n|FIN\r\n|RST\r\n|ACK\r\n|DAT\r\n)',data)
+                    del concat_packets[0]
+                    listofpackets = []
+                    for pack in concat_packets:
+                        data = pack
+                        command, header1, value1, header2, value2, payload = packetsplit(data)
+                        listofpackets.append([command, header1, value1, header2, value2, payload])
+                        listofpackets.sort(key = Sort_By_Sequence)
+                        #now that the packets are separated 
+                        #print what has been received 
+                    date = calcdate()
+                    for packet in listofpackets:
+                        print(f'{date}: Receive; {packet[0]}; {packet[1]}: {packet[2]}; {packet[3]}: {packet[4]}')
+                        if packet[2] == SEQ_NUMBER2: 
+                            if packet[5] != None: 
+                                FILETOWRITE.write(packet[5])
+                                SEQ_NUMBER2 = SEQ_NUMBER2 + packet[4]
+                                ACK_NUMBER2 = ACK_NUMBER2 + packet[4]
+                                DYNAMICWINDOW = RECVWINDOW - SEQ_NUMBER2 + ACK_NUMBER2
+                                print(f'{date}: Send; ACK; Acknowledgement: {ACK_NUMBER2}; Window: {DYNAMICWINDOW}')
+                                rdp_socket.sendto((f'ACK\r\nAcknowledgement:{ACK_NUMBER2}\r\nWindow:{DYNAMICWINDOW}\r\n\r\n').encode(FORMAT),ECHOSERVER)
+                    #now write what packets can be written to file
+
+
+                else:
+#SENDER SIDE
+                    if data[0:3] == "ACK":
+                        #without . after r' it creates an empty entry 0, but causes issues without it
+                        concat_packets = re.split(r'(?=SYN\r\n|FIN\r\n|RST\r\n|ACK\r\n|DAT\r\n)',data)
+                        del concat_packets[0]
+                        listofpackets = []
+                        for pack in concat_packets:
+                            data = pack
+                            command, header1, value1, header2, value2, payload = packetsplit(data)
+                            listofpackets.append([command, header1, value1, header2, value2, payload])
+                        listofpackets.sort(key = Sort_By_Sequence)
+                        #now that the packets are separated 
+                        #print what has been received 
+                        date = calcdate()
+                        for packet in listofpackets:
+                            ACK_NUMBER1 = packet[2]
+                            DYNAMICWINDOW = packet[4]
+                            print(f'{date}: Receive; ACK; Acknowledgement: {ACK_NUMBER1}; Window: {DYNAMICWINDOW}')
+                            CurrentWindowSize = DYNAMICWINDOW
+                        if ACK_NUMBER1 == SEQ_NUMBER1:
+                            break
+            except socket.timeout: 
+                print("SOCKET TIMEOUT DATA LOST")
+FILETOWRITE.close() 
+
+ACK_NUMBER2 = ACK_NUMBER2+1
+rdp_socket.sendto((f'FIN\r\nSequence:{SEQ_NUMBER1}\r\nLength:0\r\n\r\n').encode(FORMAT),ECHOSERVER)
+date = calcdate()
+print(f'{date}: Send; FIN; Sequence: {SEQ_NUMBER1}; Length: 0')
+
+while True: 
+    
+    try:
+        data, address = rdp_socket.recvfrom(2000)
+        data = data.decode(FORMAT)
+        if data[0:3] == "FIN":
+            date = calcdate()
+            command, header1, value1, header2, value2, payload = packetsplit(data)
+            print(f'{date}: Receive; {command}; {header1}: {value1}; {header2}: {value2}')
+            sendstring = "ACK\r\nAcknowledgment:1\r\nWindow:"+StrWindowSize+"\r\n\r\n"
+            rdp_socket.sendto((sendstring).encode(FORMAT),ECHOSERVER)
+            print(f'{date}: Send; ACK; Acknowledgement: 1; Window: {StrWindowSize}')
+            
+        
+        if data[0:3] == "ACK":
+            date = calcdate()
+            command, header1, value1, header2, value2, payload = packetsplit(data)
+            print(f'{date}: Receive; {command}; {header1}: {value1}; {header2}: {value2}')
+            CurrentWindowSize = value2
+            break 
+        
+    except socket.timeout: 
+        print(f'{date}: Send; FIN; Sequence:{SEQ_NUMBER1}; Length: 0')
+        rdp_socket.sendto((f'FIN\r\nSequence:{SEQ_NUMBER1}\r\nLength:0\r\n\r\n').encode(FORMAT),ECHOSERVER)
+        
+    
+
+
+
+
+#udp_socket.send("yo")
+#print("Send FIN")
+#if udp_socket.receive() == "FIN":
+ #   print ("Recieve FIN...")
+  #  udp_socket.send("ACK")
+  #  print("Send ACK")
+#if udp_socket.receive() == "ACK":
+ #   print("Recieve ACK...")
+#udp_socket.close```
